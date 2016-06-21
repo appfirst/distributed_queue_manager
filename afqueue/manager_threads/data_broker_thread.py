@@ -1,5 +1,4 @@
 from afqueue.common.exception_formatter import ExceptionFormatter #@UnresolvedImport
-from afqueue.common.socket_wrapper import SocketWrapper #@UnresolvedImport
 from afqueue.common.zmq_utilities import ZmqUtilities #@UnresolvedImport
 from afqueue.messages import system_messages #@UnresolvedImport
 import time, os
@@ -126,7 +125,7 @@ class DataBrokerThread:
                     # Gather and log our metrics.
                     worker_threads = len(idle_worker_id_tag_time_dict)
                     if handled_count > 0 and worker_threads > 0:
-                        average_idle_time = idle_time / handled_count * 1000
+                        # average_idle_time = idle_time / handled_count * 1000
                         average_idle_time = (idle_time / passed_time) / len(idle_worker_id_tag_time_dict)
                     else:
                         idle_time = passed_time
@@ -156,7 +155,7 @@ class DataBrokerThread:
                     sleep_flag = False
         
                     # Receive.
-                    full_raw_message = SocketWrapper.pull_message(worker_router_socket)
+                    full_raw_message = worker_router_socket.recv_multipart()
 
                     # Strip off the worker ID tag.
                     worker_id_tag = full_raw_message[0]
@@ -169,20 +168,15 @@ class DataBrokerThread:
                     
                     # If the directive is READY, we have nothing more to do: the worker was added to our available worker list already.
                     # If the directive is the client reply address, forward to the client.
-                    if directive != "READY":
+                    if directive != b"READY":
         
                         # Get the raw message from the full raw message.    
                         raw_message = full_raw_message[4:]
                         
                         # Forward, with the directive (which is the client reply id tag).
+                        final_raw_message = [directive, b""] + raw_message
+                        client_router_socket.send_multipart(final_raw_message)
 
-
-                        client_router_socket.send(directive, zmq.SNDMORE)
-                        client_router_socket.send(b"", zmq.SNDMORE)
-                        for data in raw_message[:-1]:
-                            ZmqUtilities.send_data(client_router_socket, data, zmq.SNDMORE)
-                        ZmqUtilities.send_data(client_router_socket, raw_message[-1])
-                        
                     # XXX
                     available_worker_id_tag_list.append(worker_id_tag)
                         
@@ -195,7 +189,7 @@ class DataBrokerThread:
                         sleep_flag = False
                         
                         # Get the full raw message and break it into separate components.
-                        full_raw_message = SocketWrapper.pull_message(client_router_socket)
+                        full_raw_message = client_router_socket.recv_multipart()
                         client_id_tag = full_raw_message[0]
                         raw_message = full_raw_message[2:]
                         
@@ -212,26 +206,17 @@ class DataBrokerThread:
                             idle_time += current_time - added_time
             
                             # Forward the request to the worker.
+                            final_raw_message = [worker_id_tag, b"", client_id_tag, b""] + raw_message
+                            worker_router_socket.send_multipart(final_raw_message)
 
-
-                            worker_router_socket.send(worker_id_tag.encode(), zmq.SNDMORE)
-                            worker_router_socket.send(b"", zmq.SNDMORE)
-                            worker_router_socket.send(client_id_tag, zmq.SNDMORE)
-                            worker_router_socket.send(b"", zmq.SNDMORE)
-                            for data in raw_message[:-1]:
-                                ZmqUtilities.send_data(worker_router_socket, data, zmq.SNDMORE)
-                            ZmqUtilities.send_data(worker_router_socket, raw_message[-1])
-                         
                         # If there's no raw data.
                         else:
 
                             # Notify.
                             self.action_out_queue.put(system_messages.SystemErrorMessage(self.thread_name, "Incoming message has no fields.  Sending empty message to sender."))
     
-                            # Send a reply back to the sender with no data. 
-                            client_router_socket.send(client_id_tag, zmq.SNDMORE)
-                            client_router_socket.send(b"", zmq.SNDMORE)
-                            client_router_socket.send(b"")
+                            # Send a reply back to the sender with no data.
+                            client_router_socket.send_multipart(client_id_tag, b"", b"")
                             
                 # Check the sleep flag for this iteration.
                 if sleep_flag == True:
@@ -315,7 +300,7 @@ class DataBrokerThread:
                     
                 # If the message hasn't been handled, notify.
                 if message_handled == False:
-                    self.action_out_queue.put(system_messages.SystemErrorMessage(self.thread_name, "Action queue message was not handled: {0}".format(message), self.thread_name))
+                    self.action_out_queue.put(system_messages.SystemErrorMessage(self.thread_name, "Action queue message was not handled: {0}".format(message)))
         
             except EmptyQueueException:
                 
